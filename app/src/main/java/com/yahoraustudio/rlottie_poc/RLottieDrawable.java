@@ -1,0 +1,1260 @@
+/*
+ * This is the source code of Telegram for Android v. 5.x.x.
+ * It is licensed under GNU GPL v. 2 or later.
+ * You should have received a copy of the license in this archive (see LICENSE).
+ *
+ * Copyright Nikolai Kudashov, 2013-2018.
+ */
+
+package com.yahoraustudio.rlottie_poc;
+
+import static com.yahoraustudio.rlottie_poc.AndroidUtilities.readRes;
+
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.drawable.Animatable;
+import android.graphics.drawable.BitmapDrawable;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.TextUtils;
+import android.util.Log;
+import android.view.HapticFeedbackConstants;
+import android.view.View;
+
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.concurrent.CountDownLatch;
+
+public class RLottieDrawable extends BitmapDrawable implements Animatable {
+
+    public boolean skipFrameUpdate;
+//
+    public static native long create(String src, String json, int w, int h, int[] params, boolean precache, int[] colorReplacement, boolean limitFps, int fitzModifier);
+//
+    public static native long getFramesCount(String src, String json);
+    public static native double getDuration(String src, String json);
+
+    protected static native long createWithJson(String json, String name, int[] params, int[] colorReplacement);
+
+    public static native void destroy(long ptr);
+
+    public static native int getFrame(long ptr, int frame, Bitmap bitmap, int w, int h, int stride, boolean clear);
+
+    protected final int width;
+    protected final int height;
+    protected final int[] metaData = new int[3];
+    protected int timeBetweenFrames;
+    protected int customEndFrame = -1;
+    protected boolean playInDirectionOfCustomEndFrame;
+    private HashMap<Integer, Integer> vibrationPattern;
+    private boolean resetVibrationAfterRestart = false;
+    private boolean allowVibration = true;
+
+    private WeakReference<Runnable> frameReadyCallback;
+    protected WeakReference<Runnable> onFinishCallback;
+    private int finishFrame;
+
+    private View currentParentView;
+    private final ArrayList<ImageReceiver> parentViews = new ArrayList<>();
+
+    protected int isDice;
+    protected int diceSwitchFramesCount = -1;
+
+    protected int autoRepeat = 1;
+    protected int autoRepeatCount = -1;
+    protected int autoRepeatPlayCount;
+    protected long autoRepeatTimeout;
+
+    private long lastFrameTime;
+    protected volatile boolean nextFrameIsLast;
+
+    protected Runnable cacheGenerateTask;
+    protected Runnable loadFrameTask;
+    protected volatile Bitmap renderingBitmap;
+    protected volatile Bitmap nextRenderingBitmap;
+    protected volatile Bitmap backgroundBitmap;
+    protected boolean waitingForNextTask;
+
+    protected CountDownLatch frameWaitSync;
+
+    protected boolean destroyWhenDone;
+    private boolean decodeSingleFrame;
+    private boolean singleFrameDecoded;
+    private boolean forceFrameRedraw;
+    private boolean applyingLayerColors;
+    protected int currentFrame;
+    private boolean shouldLimitFps;
+    private boolean createdForFirstFrame;
+
+    private float scaleX = 1.0f;
+    private float scaleY = 1.0f;
+    private boolean applyTransformation;
+    private boolean needScale;
+    private final RectF dstRect = new RectF();
+    public final static int THREAD_COUNT = 2;
+
+    private RectF[] dstRectBackground = new RectF[THREAD_COUNT];
+    private Paint[] backgroundPaint = new Paint[THREAD_COUNT];
+    protected static final Handler uiHandler = new Handler(Looper.getMainLooper());
+    protected volatile boolean isRunning;
+    protected volatile boolean isRecycled;
+//    protected volatile AtomicInteger readyNodeIndex;
+    protected volatile long nativePtr;
+    protected volatile long secondNativePtr;
+    protected boolean loadingInBackground;
+//    protected boolean secondLoadingInBackground;
+//    protected boolean destroyAfterLoading;
+    protected int secondFramesCount;
+    protected volatile boolean setLastFrame;
+//    private boolean fallbackCache;
+//
+    private boolean invalidateOnProgressSet;
+    private boolean isInvalid;
+    private boolean doNotRemoveInvalidOnFrameReady;
+//
+    private static final DispatchQueuePool loadFrameRunnableQueue = new DispatchQueuePool(4);
+//    public static DispatchQueue lottieCacheGenerateQueue;
+//
+//    File file;
+//    boolean precache;
+//
+    private Runnable onAnimationEndListener;
+    private Runnable onFrameReadyRunnable;
+//
+    private View masterParent;
+//    NativePtrArgs args;
+//
+    protected Runnable uiRunnableNoFrame = new Runnable() {
+        @Override
+        public void run() {
+            loadFrameTask = null;
+            decodeFrameFinishedInternal();
+            if (onFrameReadyRunnable != null) {
+                onFrameReadyRunnable.run();
+            }
+        }
+    };
+
+
+    protected Runnable uiRunnable = new Runnable() {
+        @Override
+        public void run() {
+            singleFrameDecoded = true;
+            invalidateInternal();
+            decodeFrameFinishedInternal();
+            if (onFrameReadyRunnable != null) {
+                onFrameReadyRunnable.run();
+            }
+        }
+    };
+//
+//    boolean generatingCache;
+//
+//    private Runnable uiRunnableGenerateCache = new Runnable() {
+//        @Override
+//        public void run() {
+//            if (!isRecycled && !destroyWhenDone && canLoadFrames() && cacheGenerateTask == null) {
+//                generatingCache = true;
+//                if (lottieCacheGenerateQueue == null) {
+//                    createCacheGenQueue();
+//                }
+//                BitmapsCache.incrementTaskCounter();
+//                lottieCacheGenerateQueue.postRunnable(cacheGenerateTask = () -> {
+//                    try {
+//                        BitmapsCache bitmapsCacheFinal = bitmapsCache;
+//                        if (bitmapsCacheFinal != null) {
+//                            bitmapsCacheFinal.createCache();
+//                        }
+//                    } catch (Throwable throwable) {
+//
+//                    }
+//                    uiHandler.post(uiRunnableCacheFinished);
+//                });
+//            }
+//        }
+//    };
+//
+//    private Runnable uiRunnableCacheFinished = new Runnable() {
+//        @Override
+//        public void run() {
+//            if (cacheGenerateTask != null) {
+//                BitmapsCache.decrementTaskCounter();
+//                cacheGenerateTask = null;
+//            }
+//            generatingCache = false;
+//            decodeFrameFinishedInternal();
+//            if (whenCacheDone != null) {
+//                whenCacheDone.run();
+//                whenCacheDone = null;
+//            }
+//        }
+//    };
+//
+//    public Runnable whenCacheDone;
+//
+//    BitmapsCache bitmapsCache;
+//    int generateCacheFramePointer;
+//
+//    public static void createCacheGenQueue() {
+//        lottieCacheGenerateQueue = new DispatchQueue("cache generator queue");
+//    }
+//
+    protected void checkRunningTasks() {
+        if (!hasParentView() && nextRenderingBitmap != null && loadFrameTask != null) {
+            loadFrameTask = null;
+            nextRenderingBitmap = null;
+        }
+    }
+
+    protected void decodeFrameFinishedInternal() {
+        if (destroyWhenDone) {
+            checkRunningTasks();
+            if (loadFrameTask == null && cacheGenerateTask == null && nativePtr != 0) {
+                recycleNativePtr(true);
+            }
+        }
+
+        waitingForNextTask = true;
+        if (!hasParentView()) {
+            stop();
+        }
+        if (isRunning) {
+            scheduleNextGetFrame();
+        }
+    }
+
+    private void recycleNativePtr(boolean uiThread) {
+        long nativePtrFinal = nativePtr;
+        long secondNativePtrFinal = secondNativePtr;
+
+        nativePtr = 0;
+        secondNativePtr = 0;
+        if (nativePtrFinal != 0 || secondNativePtrFinal != 0) {
+            if (uiThread) {
+                DispatchQueuePoolBackground.execute(() -> {
+                    if (nativePtrFinal != 0) {
+                        destroy(nativePtrFinal);
+                    }
+                    if (secondNativePtrFinal != 0) {
+                        destroy(secondNativePtrFinal);
+                    }
+                });
+            } else {
+                AndroidUtilities.globalQueue.postRunnable(() ->{
+                    if (nativePtrFinal != 0) {
+                        destroy(nativePtrFinal);
+                    }
+                    if (secondNativePtrFinal != 0) {
+                        destroy(secondNativePtrFinal);
+                    }
+                });
+            }
+        }
+    }
+//
+//    protected void recycleResources() {
+//        ArrayList<Bitmap> bitmapToRecycle = new ArrayList<>();
+//        bitmapToRecycle.add(renderingBitmap);
+//        bitmapToRecycle.add(backgroundBitmap);
+//        bitmapToRecycle.add(nextRenderingBitmap);
+//        nextRenderingBitmap = null;
+//        renderingBitmap = null;
+//        backgroundBitmap = null;
+//        AndroidUtilities.recycleBitmaps(bitmapToRecycle);
+//
+//        if (onAnimationEndListener != null) {
+//            onAnimationEndListener = null;
+//        }
+//    }
+//
+//    public void setOnFinishCallback(Runnable callback, int frame) {
+//        if (callback != null) {
+//            onFinishCallback = new WeakReference<>(callback);
+//            finishFrame = frame;
+//        } else if (onFinishCallback != null) {
+//            onFinishCallback = null;
+//        }
+//    }
+//
+//    private boolean genCacheSend;
+//    private boolean allowDrawFramesWhileCacheGenerating;
+//    private long lastDrawnTime;
+    protected Runnable loadFrameRunnable = new Runnable() {
+        private long lastUpdate = 0;
+
+        @Override
+        public void run() {
+            if (isRecycled) {
+                return;
+            }
+            if (!canLoadFrames() || isDice == 2 && secondNativePtr == 0) {
+                if (frameWaitSync != null) {
+                    frameWaitSync.countDown();
+                }
+                uiHandler.post(uiRunnableNoFrame);
+                return;
+            }
+            if (backgroundBitmap == null) {
+                try {
+                    backgroundBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                } catch (Throwable e) {
+                    Log.e("rLottie", e.getLocalizedMessage());
+                }
+            }
+            if (backgroundBitmap != null) {
+                try {
+                    long ptrToUse;
+                    if (isDice == 1) {
+                        ptrToUse = nativePtr;
+                    } else if (isDice == 2) {
+                        ptrToUse = secondNativePtr;
+                        if (setLastFrame) {
+                            currentFrame = secondFramesCount - 1;
+                        }
+                    } else {
+                        ptrToUse = nativePtr;
+                    }
+                    int result = 0;
+                    int framesPerUpdates = shouldLimitFps ? 2 : 1;
+                    final long start = System.currentTimeMillis();
+
+                    result = getFrame(ptrToUse, currentFrame, backgroundBitmap, width, height, backgroundBitmap.getRowBytes(), true);
+
+                    if (result == -1) {
+                        uiHandler.post(uiRunnableNoFrame);
+                        if (frameWaitSync != null) {
+                            frameWaitSync.countDown();
+                        }
+                        return;
+                    }
+
+                    nextRenderingBitmap = backgroundBitmap;
+
+                    if (isDice == 1) {
+                        if (currentFrame + framesPerUpdates < (diceSwitchFramesCount == -1 ? metaData[0] : diceSwitchFramesCount)) {
+                            currentFrame += framesPerUpdates;
+                        } else {
+                            currentFrame = 0;
+                            nextFrameIsLast = false;
+                            if (secondNativePtr != 0) {
+                                isDice = 2;
+                            }
+                            if (resetVibrationAfterRestart) {
+                                vibrationPattern = null;
+                                resetVibrationAfterRestart = false;
+                            }
+                        }
+                    } else if (isDice == 2) {
+                        if (currentFrame + framesPerUpdates < secondFramesCount) {
+                            currentFrame += framesPerUpdates;
+                        } else {
+                            nextFrameIsLast = true;
+                            autoRepeatPlayCount++;
+                        }
+                    } else {
+                        if (customEndFrame >= 0 && playInDirectionOfCustomEndFrame) {
+                            if (currentFrame > customEndFrame) {
+                                if (currentFrame - framesPerUpdates >= customEndFrame) {
+                                    currentFrame -= framesPerUpdates;
+                                    nextFrameIsLast = false;
+                                } else {
+                                    nextFrameIsLast = true;
+                                    checkDispatchOnAnimationEnd();
+                                }
+                            } else {
+                                if (currentFrame + framesPerUpdates < customEndFrame) {
+                                    currentFrame += framesPerUpdates;
+                                    nextFrameIsLast = false;
+                                } else {
+                                    nextFrameIsLast = true;
+                                    checkDispatchOnAnimationEnd();
+                                }
+                            }
+                        } else {
+                            if (currentFrame + framesPerUpdates < (customEndFrame >= 0 ? customEndFrame : metaData[0])) {
+                                if (autoRepeat == 3) {
+                                    nextFrameIsLast = true;
+                                    autoRepeatPlayCount++;
+                                } else {
+                                    currentFrame += framesPerUpdates;
+                                    nextFrameIsLast = false;
+                                }
+                            } else if (autoRepeat == 1) {
+                                currentFrame = 0;
+                                nextFrameIsLast = false;
+                                if (resetVibrationAfterRestart) {
+                                    vibrationPattern = null;
+                                    resetVibrationAfterRestart = false;
+                                }
+                                if (autoRepeatCount > 0) {
+                                    autoRepeatCount--;
+                                }
+                            } else if (autoRepeat == 2) {
+                                currentFrame = 0;
+                                nextFrameIsLast = true;
+                                autoRepeatPlayCount++;
+                                if (resetVibrationAfterRestart) {
+                                    vibrationPattern = null;
+                                    resetVibrationAfterRestart = false;
+                                }
+                            } else {
+                                nextFrameIsLast = true;
+                                checkDispatchOnAnimationEnd();
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e("rLottie", e.getLocalizedMessage());
+                }
+            }
+            uiHandler.post(uiRunnable);
+            if (frameWaitSync != null) {
+                frameWaitSync.countDown();
+            }
+        }
+    };
+
+
+//
+//    private void parseLottieMetadata(File file, String json, int[] metaData) {
+//        try {
+//            double fr = 30.0;
+//            double ip = 0;
+//            double op = 0;
+//            try (JsonReader reader = new JsonReader(new FileReader(file.getAbsoluteFile()))) {
+//                reader.beginObject();
+//                while (reader.hasNext()) {
+//                    String name = reader.nextName();
+//                    switch (name) {
+//                        case "ip": {
+//                            ip = reader.nextDouble();
+//                            break;
+//                        }
+//                        case "op": {
+//                            op = reader.nextDouble();
+//                            break;
+//                        }
+//                        case "fr": {
+//                            fr = reader.nextDouble();
+//                            break;
+//                        }
+//                        default: {
+//                            reader.skipValue();
+//                            break;
+//                        }
+//                    }
+//                }
+//                reader.endObject();
+//            }
+//            metaData[0] = (int) (op - ip);
+//            metaData[1] = (int) fr;
+//        } catch (Exception e) {
+//            // ignore app center, try handle by old method
+//            FileLog.e(e, false);
+//            long nativePtr = create(file.getAbsolutePath(), json, width, height, metaData, false, args.colorReplacement, shouldLimitFps, args.fitzModifier);
+//            if (nativePtr != 0) {
+//                destroy(nativePtr);
+//            }
+//        }
+//    }
+
+
+    private void checkDispatchOnAnimationEnd() {
+        if (onAnimationEndListener != null) {
+            onAnimationEndListener.run();
+            onAnimationEndListener = null;
+        }
+    }
+
+    public void setOnAnimationEndListener(Runnable onAnimationEndListener) {
+        this.onAnimationEndListener = onAnimationEndListener;
+    }
+
+//    public boolean setBaseDice(File path) {
+//        if (nativePtr != 0 || loadingInBackground) {
+//            return true;
+//        }
+//        String jsonString = readRes(path);
+//        if (TextUtils.isEmpty(jsonString)) {
+//            return false;
+//        }
+//        loadingInBackground = true;
+//        Utilities.globalQueue.postRunnable(() -> {
+//            nativePtr = createWithJson(jsonString, "dice", metaData, null);
+//            AndroidUtilities.runOnUIThread(() -> {
+//                loadingInBackground = false;
+//                if (!secondLoadingInBackground && destroyAfterLoading) {
+//                    recycle(true);
+//                    return;
+//                }
+//                timeBetweenFrames = Math.max(16, (int) (1000.0f / metaData[1]));
+//                scheduleNextGetFrame();
+//                invalidateInternal();
+//            });
+//        });
+//
+//        return true;
+//    }
+//
+//    public boolean hasBaseDice() {
+//        return nativePtr != 0 || loadingInBackground;
+//    }
+//
+//    public boolean setDiceNumber(File path, boolean instant) {
+//        if (secondNativePtr != 0 || secondLoadingInBackground) {
+//            return true;
+//        }
+//        String jsonString = readRes(path);
+//        if (TextUtils.isEmpty(jsonString)) {
+//            return false;
+//        }
+//        if (instant && nextRenderingBitmap == null && renderingBitmap == null && loadFrameTask == null) {
+//            isDice = 2;
+//            setLastFrame = true;
+//        }
+//        secondLoadingInBackground = true;
+//        Utilities.globalQueue.postRunnable(() -> {
+//            if (destroyAfterLoading) {
+//                AndroidUtilities.runOnUIThread(() -> {
+//                    secondLoadingInBackground = false;
+//                    if (!loadingInBackground && destroyAfterLoading) {
+//                        recycle(true);
+//                    }
+//                });
+//                return;
+//            }
+//            int[] metaData2 = new int[3];
+//            secondNativePtr = createWithJson(jsonString, "dice", metaData2, null);
+//            AndroidUtilities.runOnUIThread(() -> {
+//                secondLoadingInBackground = false;
+//                if (!secondLoadingInBackground && destroyAfterLoading) {
+//                    recycle(true);
+//                    return;
+//                }
+//                secondFramesCount = metaData2[0];
+//                timeBetweenFrames = Math.max(16, (int) (1000.0f / metaData2[1]));
+//                scheduleNextGetFrame();
+//                invalidateInternal();
+//            });
+//        });
+//        return true;
+//    }
+//
+
+
+    public RLottieDrawable(int rawRes, String name, int w, int h, boolean startDecode, int[] colorReplacement) {
+        width = w;
+        height = h;
+        autoRepeat = 0;
+        String jsonString = readRes(rawRes);
+        if (TextUtils.isEmpty(jsonString)) {
+            return;
+        }
+        getPaint().setFlags(Paint.FILTER_BITMAP_FLAG);
+        nativePtr = createWithJson(jsonString, name, metaData, colorReplacement);
+        timeBetweenFrames = Math.max(16, (int) (1000.0f / metaData[1]));
+        if (startDecode) {
+            setAllowDecodeSingleFrame(true);
+        }
+    }
+//
+//    public void multiplySpeed(float multiplier) {
+//        timeBetweenFrames *= (1f / multiplier);
+//    }
+//
+//    public int getCurrentFrame() {
+//        return currentFrame;
+//    }
+//
+//    public float getProgress() {
+//        return (float) currentFrame / metaData[0];
+//    }
+//
+//    public int getCustomEndFrame() {
+//        return customEndFrame;
+//    }
+//
+//    public long getDuration() {
+//        return (long) (metaData[0] / (float) metaData[1] * 1000);
+//    }
+//
+//    public void setPlayInDirectionOfCustomEndFrame(boolean value) {
+//        playInDirectionOfCustomEndFrame = value;
+//    }
+//
+//    public boolean setCustomEndFrame(int frame) {
+//        if (customEndFrame == frame || frame > metaData[0]) {
+//            return false;
+//        }
+//        customEndFrame = frame;
+//        return true;
+//    }
+//
+//    public int getFramesCount() {
+//        return metaData[0];
+//    }
+//
+//    public void addParentView(ImageReceiver parent) {
+//        if (parent == null) {
+//            return;
+//        }
+//        parentViews.add(parent);
+//    }
+//
+//    public void removeParentView(ImageReceiver parent) {
+//        if (parent == null) {
+//            return;
+//        }
+//        parentViews.remove(parent);
+//        checkCacheCancel();
+//    }
+//
+//    public void checkCacheCancel() {
+//        if (bitmapsCache == null || lottieCacheGenerateQueue == null || cacheGenerateTask == null) {
+//            return;
+//        }
+//        boolean mustCancel = parentViews.isEmpty() && getCallback() == null;
+//        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+//            mustCancel = mustCancel && (masterParent == null || !masterParent.isAttachedToWindow());
+//        } else {
+//            mustCancel = mustCancel && masterParent == null;
+//        }
+//        if (mustCancel) {
+//            if (cacheGenerateTask != null) {
+//                lottieCacheGenerateQueue.cancelRunnable(cacheGenerateTask);
+//                BitmapsCache.decrementTaskCounter();
+//                cacheGenerateTask = null;
+//            }
+//            generatingCache = false;
+//            genCacheSend = false;
+//        }
+//    }
+//
+    protected boolean hasParentView() {
+        return !parentViews.isEmpty() || masterParent != null || getCallback() != null;
+    }
+
+    protected void invalidateInternal() {
+        if (isRecycled) {
+            return;
+        }
+//        for (int i = 0, N = parentViews.size(); i < N; i++) {
+//            parentViews.get(i).invalidate();
+//        }
+        if (masterParent != null) {
+            masterParent.invalidate();
+        }
+        if (getCallback() != null) {
+            invalidateSelf();
+        }
+    }
+
+    public void setAllowDecodeSingleFrame(boolean value) {
+        decodeSingleFrame = value;
+        if (decodeSingleFrame) {
+            scheduleNextGetFrame();
+        }
+    }
+//
+//    public void recycle(boolean uiThread) {
+//        isRunning = false;
+//        isRecycled = true;
+//        checkRunningTasks();
+//        if (loadingInBackground || secondLoadingInBackground) {
+//            destroyAfterLoading = true;
+//        } else if (loadFrameTask == null && cacheGenerateTask == null && !generatingCache) {
+//            recycleNativePtr(uiThread);
+//            if (bitmapsCache != null) {
+//                bitmapsCache.recycle();
+//                bitmapsCache = null;
+//            }
+//            recycleResources();
+//        } else {
+//            destroyWhenDone = true;
+//        }
+//    }
+//
+    public void setAutoRepeat(int value) {
+        if (autoRepeat == 2 && value == 3 && currentFrame != 0) {
+            return;
+        }
+        autoRepeat = value;
+    }
+
+    public void setAutoRepeatCount(int count) {
+        autoRepeatCount = count;
+    }
+//
+//    public void setAutoRepeatTimeout(long timeout) {
+//        autoRepeatTimeout = timeout;
+//    }
+//
+//    @Override
+//    protected void finalize() throws Throwable {
+//        try {
+//            recycle(false);
+//        } finally {
+//            super.finalize();
+//        }
+//    }
+//
+    @Override
+    public int getOpacity() {
+        return PixelFormat.TRANSPARENT;
+    }
+
+    @Override
+    public void start() {
+        if (isRunning || autoRepeat >= 2 && autoRepeatPlayCount != 0 || customEndFrame == currentFrame) {
+            return;
+        }
+        isRunning = true;
+        if (invalidateOnProgressSet) {
+            isInvalid = true;
+            if (loadFrameTask != null) {
+                doNotRemoveInvalidOnFrameReady = true;
+            }
+        }
+        scheduleNextGetFrame();
+        invalidateInternal();
+    }
+//
+//    public boolean restart() {
+//        return restart(false);
+//    }
+//
+//    public boolean restart(boolean force) {
+//        if (!force && (autoRepeat < 2 || autoRepeatPlayCount == 0) && autoRepeatCount < 0) {
+//            return false;
+//        }
+//        autoRepeatPlayCount = 0;
+//        autoRepeat = 2;
+//        start();
+//        return true;
+//    }
+//
+//    public void setVibrationPattern(HashMap<Integer, Integer> pattern) {
+//        vibrationPattern = pattern;
+//    }
+//
+//    public boolean hasVibrationPattern() {
+//        return vibrationPattern != null;
+//    }
+//
+//    public void beginApplyLayerColors() {
+//        applyingLayerColors = true;
+//    }
+//
+//    public void commitApplyLayerColors() {
+//        if (!applyingLayerColors) {
+//            return;
+//        }
+//        applyingLayerColors = false;
+//        if (!isRunning && decodeSingleFrame) {
+//            if (currentFrame <= 2) {
+//                currentFrame = 0;
+//            }
+//            nextFrameIsLast = false;
+//            singleFrameDecoded = false;
+//            if (!scheduleNextGetFrame()) {
+//                forceFrameRedraw = true;
+//            }
+//        }
+//        invalidateInternal();
+//    }
+//
+//    public void replaceColors(int[] colors) {
+//        newReplaceColors = colors;
+//        requestRedrawColors();
+//    }
+//
+//    public void setLayerColor(String layerName, int color) {
+//        newColorUpdates.put(layerName, color);
+//        requestRedrawColors();
+//    }
+//
+//    private void requestRedrawColors() {
+//        if (!applyingLayerColors && !isRunning && decodeSingleFrame) {
+//            if (currentFrame <= 2) {
+//                currentFrame = 0;
+//            }
+//            nextFrameIsLast = false;
+//            singleFrameDecoded = false;
+//            if (!scheduleNextGetFrame()) {
+//                forceFrameRedraw = true;
+//            }
+//        }
+//        invalidateInternal();
+//    }
+//
+    protected boolean scheduleNextGetFrame() {
+        if (loadFrameTask != null || nextRenderingBitmap != null || !canLoadFrames() || loadingInBackground || destroyWhenDone || !isRunning && (!decodeSingleFrame || decodeSingleFrame && singleFrameDecoded)) {
+            return false;
+        }
+        loadFrameTask = loadFrameRunnable;
+        loadFrameRunnableQueue.execute(loadFrameTask);
+        return true;
+    }
+//
+//    public void post(Runnable runnable) {
+//        if (shouldLimitFps && Thread.currentThread() == ApplicationLoader.applicationHandler.getLooper().getThread()) {
+//            DispatchQueuePoolBackground.execute(() -> AndroidUtilities.runOnUIThread(runnable), frameWaitSync != null);
+//        } else {
+//            loadFrameRunnableQueue.execute(() -> AndroidUtilities.runOnUIThread(runnable));
+//        }
+//    }
+//
+//    public boolean isHeavyDrawable() {
+//        return isDice == 0;
+//    }
+//
+    @Override
+    public void stop() {
+        isRunning = false;
+    }
+
+    public void setCurrentFrame(int frame, boolean async, boolean resetFrame) {
+        if (frame < 0 || frame > metaData[0] || (currentFrame == frame && !resetFrame)) {
+            return;
+        }
+        currentFrame = frame;
+        nextFrameIsLast = false;
+        singleFrameDecoded = false;
+        if (invalidateOnProgressSet) {
+            isInvalid = true;
+            if (loadFrameTask != null) {
+                doNotRemoveInvalidOnFrameReady = true;
+            }
+        }
+        if ((!async || resetFrame) && waitingForNextTask && nextRenderingBitmap != null) {
+            backgroundBitmap = nextRenderingBitmap;
+            nextRenderingBitmap = null;
+            loadFrameTask = null;
+            waitingForNextTask = false;
+        }
+        if (!async) {
+            if (loadFrameTask == null) {
+                frameWaitSync = new CountDownLatch(1);
+            }
+        }
+        if (resetFrame && !isRunning) {
+            isRunning = true;
+        }
+        if (scheduleNextGetFrame()) {
+            if (!async) {
+                try {
+                    frameWaitSync.await();
+                } catch (Exception e) {
+                    Log.e("rLottie", e.getLocalizedMessage().toString());
+                }
+                frameWaitSync = null;
+            }
+        } else {
+            forceFrameRedraw = true;
+        }
+        invalidateSelf();
+    }
+//
+//    public boolean isCacheFallbacked() {
+//        return fallbackCache;
+//    }
+//
+//    public void setProgressMs(long ms) {
+//        int frameNum = (int) ((Math.max(0, ms) / timeBetweenFrames) % metaData[0]);
+//        setCurrentFrame(frameNum, true, true);
+//    }
+//
+//    public void setProgress(float progress) {
+//        setProgress(progress, true);
+//    }
+//
+//    public void setProgress(float progress, boolean async) {
+//        if (progress < 0.0f) {
+//            progress = 0.0f;
+//        } else if (progress > 1.0f) {
+//            progress = 1.0f;
+//        }
+//        setCurrentFrame((int) (metaData[0] * progress), async);
+//    }
+//
+//    public void setCurrentParentView(View view) {
+//        currentParentView = view;
+//    }
+//
+//
+    @Override
+    public boolean isRunning() {
+        return isRunning;
+    }
+
+    @Override
+    public int getIntrinsicHeight() {
+        return height;
+    }
+
+    @Override
+    public int getIntrinsicWidth() {
+        return width;
+    }
+
+    @Override
+    protected void onBoundsChange(Rect bounds) {
+        super.onBoundsChange(bounds);
+        applyTransformation = true;
+    }
+
+    private void setCurrentFrame(long now, long timeDiff, long timeCheck, boolean force) {
+        backgroundBitmap = renderingBitmap;
+        renderingBitmap = nextRenderingBitmap;
+        nextRenderingBitmap = null;
+        if (isDice == 2) {
+            if (onFinishCallback != null && currentFrame - 1 >= finishFrame) {
+                Runnable runnable = onFinishCallback.get();
+                if (runnable != null) {
+                    runnable.run();
+                }
+                onFinishCallback = null;
+            }
+        }
+        if (nextFrameIsLast || autoRepeatCount == 0 && autoRepeat == 1) {
+            stop();
+        }
+        loadFrameTask = null;
+        if (doNotRemoveInvalidOnFrameReady) {
+            doNotRemoveInvalidOnFrameReady = false;
+        } else if (isInvalid) {
+            isInvalid = false;
+        }
+        singleFrameDecoded = true;
+        waitingForNextTask = false;
+        //todo may have
+//        if (AndroidUtilities.screenRefreshRate <= 60) {
+            lastFrameTime = now;
+//        } else {
+//            lastFrameTime = now - Math.min(16, timeDiff - timeCheck);
+//        }
+        if (force && forceFrameRedraw) {
+            singleFrameDecoded = false;
+            forceFrameRedraw = false;
+        }
+        if (isDice == 0) {
+            if (onFinishCallback != null && currentFrame >= finishFrame) {
+                Runnable runnable = onFinishCallback.get();
+                if (runnable != null) {
+                    runnable.run();
+                }
+            }
+        }
+        scheduleNextGetFrame();
+    }
+
+    @Override
+    public void draw(Canvas canvas) {
+        drawInternal(canvas, null, false, 0, 0);
+    }
+
+    public void drawInBackground(Canvas canvas, float x, float y, float w, float h, int alpha, ColorFilter colorFilter, int threadIndex) {
+        if (dstRectBackground[threadIndex] == null) {
+            dstRectBackground[threadIndex] = new RectF();
+            backgroundPaint[threadIndex] = new Paint(Paint.ANTI_ALIAS_FLAG);
+            backgroundPaint[threadIndex].setFilterBitmap(true);
+        }
+        backgroundPaint[threadIndex].setAlpha(alpha);
+        backgroundPaint[threadIndex].setColorFilter(colorFilter);
+        dstRectBackground[threadIndex].set(x, y, x + w, y + h);
+        drawInternal(canvas, null,true, 0, threadIndex);
+    }
+//
+//    public void draw(Canvas canvas, Paint paint) {
+//        drawInternal(canvas, paint, false, 0, 0);
+//    }
+//
+    public boolean scaleByCanvas;
+    public Rect srcRect = new Rect();
+//
+    public void drawInternal(Canvas canvas, Paint overridePaint, boolean drawInBackground, long time, int threadIndex) {
+        if (!canLoadFrames() || destroyWhenDone) {
+            return;
+        }
+        if (!drawInBackground) {
+            updateCurrentFrame(time, false);
+        }
+
+        RectF rect = drawInBackground ? dstRectBackground[threadIndex] : dstRect;
+        Paint paint = overridePaint != null ? overridePaint : (drawInBackground ? backgroundPaint[threadIndex] : getPaint());
+
+        if (paint.getAlpha() == 0) {
+            return;
+        }
+
+        if (!isInvalid && renderingBitmap != null) {
+            float scaleX, scaleY;
+            boolean needScale;
+            if (!drawInBackground) {
+                rect.set(getBounds());
+                if (applyTransformation) {
+                    this.scaleX = rect.width() / width;
+                    this.scaleY = rect.height() / height;
+                    applyTransformation = false;
+                    this.needScale = !(Math.abs(rect.width() - width) < MainActivityKt.getDp(1) && Math.abs(rect.height() - height) < MainActivityKt.getDp(1));
+                }
+                scaleX = this.scaleX;
+                scaleY = this.scaleY;
+                needScale = this.needScale;
+            } else {
+                scaleX = rect.width() / width;
+                scaleY = rect.height() / height;
+                needScale = !(Math.abs(rect.width() - width) < MainActivityKt.getDp(1) && Math.abs(rect.height() - height) < MainActivityKt.getDp(1));
+            }
+            if (!needScale) {
+                canvas.drawBitmap(renderingBitmap, rect.left, rect.top, paint);
+            } else {
+                if (scaleByCanvas) {
+                    // save-restore breaks cutting with xfer
+                    srcRect.set(0, 0, renderingBitmap.getWidth(), renderingBitmap.getHeight());
+                    canvas.drawBitmap(renderingBitmap, srcRect, rect, paint);
+                } else {
+                    canvas.save();
+                    canvas.translate(rect.left, rect.top);
+                    canvas.scale(scaleX, scaleY);
+                    canvas.drawBitmap(renderingBitmap, 0, 0, paint);
+                    canvas.restore();
+                }
+            }
+
+            if (isRunning && !drawInBackground) {
+                invalidateInternal();
+            }
+        }
+    }
+
+    public void updateCurrentFrame(long time, boolean updateInBackground) {
+        long now = time == 0 ? System.currentTimeMillis() : time;
+        long timeDiff = now - lastFrameTime;
+        int timeCheck;
+        if (updateInBackground && !shouldLimitFps) {
+            timeCheck = timeBetweenFrames - 16;
+        }
+        //todo
+//        else if (AndroidUtilities.screenRefreshRate <= 60 || (updateInBackground && AndroidUtilities.screenRefreshRate <= 80)) {
+//            timeCheck = timeBetweenFrames - 6;
+//        }
+        else {
+            timeCheck = timeBetweenFrames;
+        }
+        if (isRunning) {
+            if (renderingBitmap == null && nextRenderingBitmap == null) {
+                scheduleNextGetFrame();
+            } else if (nextRenderingBitmap != null && (renderingBitmap == null || (timeDiff >= timeCheck && !skipFrameUpdate))) {
+                if (vibrationPattern != null && currentParentView != null && allowVibration) {
+                    Integer force = vibrationPattern.get(currentFrame - 1);
+                    if (force != null) {
+                        try {
+                            currentParentView.performHapticFeedback(force == 1 ? HapticFeedbackConstants.LONG_PRESS : HapticFeedbackConstants.KEYBOARD_TAP, HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
+                        } catch (Exception ignored) {}
+                    }
+                }
+                setCurrentFrame(now, timeDiff, timeCheck, false);
+            }
+        } else if ((forceFrameRedraw || decodeSingleFrame && timeDiff >= timeCheck) && nextRenderingBitmap != null) {
+            setCurrentFrame(now, timeDiff, timeCheck, true);
+        }
+    }
+//
+//    public void setAllowVibration(boolean allow) {
+//        allowVibration = allow;
+//    }
+//
+//    public void resetVibrationAfterRestart(boolean value) {
+//        resetVibrationAfterRestart = value;
+//    }
+//
+//    @Override
+//    public int getMinimumHeight() {
+//        return height;
+//    }
+//
+//    @Override
+//    public int getMinimumWidth() {
+//        return width;
+//    }
+//
+//    public Bitmap getRenderingBitmap() {
+//        return renderingBitmap;
+//    }
+//
+//    public Bitmap getNextRenderingBitmap() {
+//        return nextRenderingBitmap;
+//    }
+//
+//    public Bitmap getBackgroundBitmap() {
+//        return backgroundBitmap;
+//    }
+//
+//    public Bitmap getAnimatedBitmap() {
+//        if (renderingBitmap != null) {
+//            return renderingBitmap;
+//        } else if (nextRenderingBitmap != null) {
+//            return nextRenderingBitmap;
+//        }
+//        return null;
+//    }
+//
+//    public boolean hasBitmap() {
+//        return !isRecycled && (renderingBitmap != null || nextRenderingBitmap != null) && !isInvalid;
+//    }
+//
+    public void setInvalidateOnProgressSet(boolean value) {
+        invalidateOnProgressSet = value;
+    }
+//
+//    public boolean isGeneratingCache() {
+//        return cacheGenerateTask != null;
+//    }
+//
+//    public float getGeneratingCacheProgress() {
+//        if (bitmapsCache == null) return 1f;
+//        if (cacheGenerateTask == null) return bitmapsCache.checked ? bitmapsCache.needGenCache() ? 0f : 1f : -2f;
+//        return Utilities.clamp((float) bitmapsCache.framesProcessed.get() / getFramesCount(), 1f, 0f);
+//    }
+//
+//    public void setOnFrameReadyRunnable(Runnable onFrameReadyRunnable) {
+//        this.onFrameReadyRunnable = onFrameReadyRunnable;
+//    }
+//
+//    public boolean isLastFrame() {
+//        return currentFrame == getFramesCount() - 1;
+//    }
+//
+//    long generateCacheNativePtr;
+//
+//    @Override
+//    public void prepareForGenerateCache() {
+//        generateCacheNativePtr = create(args.file.toString(), args.json, width, height, createdForFirstFrame ? metaData : new int[3], false, args.colorReplacement, false, args.fitzModifier);
+//        if (generateCacheNativePtr == 0 && file != null) {
+//            file.delete();
+//        }
+//    }
+//
+//    public void setGeneratingFrame(int i) {
+//        generateCacheFramePointer = i;
+//    }
+//
+//    @Override
+//    public int getNextFrame(Bitmap bitmap) {
+//        if (generateCacheNativePtr == 0) {
+//            return -1;
+//        }
+//        int framesPerUpdates = shouldLimitFps ? 2 : 1;
+//        int result = getFrame(generateCacheNativePtr, generateCacheFramePointer, bitmap, width, height, bitmap.getRowBytes(), true);
+//        if (result == -5) {
+//            try {
+//                Thread.sleep(100);
+//            } catch (InterruptedException e) {
+//                e.printStackTrace();
+//            }
+//            return getNextFrame(bitmap);
+//        }
+//        generateCacheFramePointer += framesPerUpdates;
+//        if (generateCacheFramePointer > metaData[0]) {
+//            return 0;
+//        }
+//        return 1;
+//    }
+//
+//    private int rawBackgroundBitmapFrame = -1;
+//    private Bitmap rawBackgroundBitmap;
+//
+//    public void cacheFrame(int frame) {
+//        if (rawBackgroundBitmapFrame != frame || rawBackgroundBitmap == null) {
+//            if (rawBackgroundBitmap == null) {
+//                rawBackgroundBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+//            }
+//            int result = getFrame(nativePtr, rawBackgroundBitmapFrame = frame, rawBackgroundBitmap, width, height, rawBackgroundBitmap.getRowBytes(), true);
+//        }
+//    }
+//
+//    public void drawFrame(Canvas canvas, int frame) {
+//        cacheFrame(frame);
+//        if (rawBackgroundBitmap != null) {
+//            AndroidUtilities.rectTmp2.set(0, 0, width, height);
+//            canvas.drawBitmap(rawBackgroundBitmap, AndroidUtilities.rectTmp2, getBounds(), getPaint());
+//        }
+//    }
+//
+//    @Override
+//    public void releaseForGenerateCache() {
+//        if (generateCacheNativePtr != 0) {
+//            destroy(generateCacheNativePtr);
+//            generateCacheNativePtr = 0;
+//        }
+//    }
+//
+//    @Override
+//    public Bitmap getFirstFrame(Bitmap bitmap) {
+//        long nativePtr = create(args.file.toString(), args.json, width, height, new int[3], false, args.colorReplacement, false, args.fitzModifier);
+//        if (nativePtr == 0) {
+//            return bitmap;
+//        }
+//        getFrame(nativePtr, 0, bitmap, width, height, bitmap.getRowBytes(), true);
+//        destroy(nativePtr);
+//        return bitmap;
+//    }
+//
+    public void setMasterParent(View parent) {
+        masterParent = parent;
+    }
+
+    public boolean canLoadFrames() {
+        return nativePtr != 0;
+    }
+//
+//    private class NativePtrArgs {
+//        public int[] colorReplacement;
+//        public int fitzModifier;
+//        File file;
+//        String json;
+//    }
+//
+//    public void checkCache(Runnable onReady) {
+//        if (bitmapsCache == null) {
+//            AndroidUtilities.runOnUIThread(onReady);
+//            return;
+//        }
+//
+//        generatingCache = true;
+//        if (lottieCacheGenerateQueue == null) {
+//            createCacheGenQueue();
+//        }
+//        if (cacheGenerateTask == null) {
+//            BitmapsCache.incrementTaskCounter();
+//            lottieCacheGenerateQueue.postRunnable(cacheGenerateTask = () -> {
+//                try {
+//                    BitmapsCache bitmapsCacheFinal = bitmapsCache;
+//                    if (bitmapsCacheFinal != null) {
+//                        bitmapsCacheFinal.createCache();
+//                    }
+//                } catch (Throwable e) {
+//                    FileLog.e(e);
+//                }
+//                AndroidUtilities.runOnUIThread(() -> {
+//                    onReady.run();
+//                    if (cacheGenerateTask != null) {
+//                        cacheGenerateTask = null;
+//                        BitmapsCache.decrementTaskCounter();
+//                    }
+//                });
+//            });
+//        }
+//    }
+//
+//    public void setAllowDrawFramesWhileCacheGenerating(boolean allow) {
+//        allowDrawFramesWhileCacheGenerating = allow;
+//    }
+}
